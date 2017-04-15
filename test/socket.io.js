@@ -1,8 +1,15 @@
-
+var testVersion = process.env.TEST_VERSION;
 var http = require('http').Server;
-var io = require('..');
+var io;
+if (testVersion === 'compat') {
+  console.log('testing compat version');
+  io = require('../dist');
+} else {
+  io = require('../lib');
+}
 var fs = require('fs');
 var join = require('path').join;
+var exec = require('child_process').exec;
 var ioc = require('socket.io-client');
 var request = require('supertest');
 var expect = require('expect.js');
@@ -80,9 +87,6 @@ describe('socket.io', function(){
       srv.set('authorization', function(o, f) { f(null, false); });
 
       var socket = client(httpSrv);
-      socket.on('connect', function(){
-        expect().fail();
-      });
       socket.on('error', function(err) {
         expect(err).to.be('Not authorized');
         done();
@@ -160,7 +164,7 @@ describe('socket.io', function(){
           if (err) return done(err);
           var ctype = res.headers['content-type'];
           expect(ctype).to.be('application/javascript');
-          expect(res.headers.etag).to.be(clientVersion);
+          expect(res.headers.etag).to.be('"' + clientVersion + '"');
           expect(res.text).to.match(/engine\.io/);
           expect(res.status).to.be(200);
           done();
@@ -172,7 +176,7 @@ describe('socket.io', function(){
         io(srv);
         request(srv)
         .get('/socket.io/socket.io.js')
-        .set('If-None-Match', clientVersion)
+        .set('If-None-Match', '"' + clientVersion + '"')
         .end(function(err, res){
           if (err) return done(err);
           expect(res.statusCode).to.be(304);
@@ -244,7 +248,7 @@ describe('socket.io', function(){
       request.get('http://localhost:54013/socket.io/default/')
        .query({ transport: 'polling' })
        .end(function (err, res) {
-          expect(res.status).to.be(400);
+          expect(res.status).to.be(403);
           done();
         });
     });
@@ -255,7 +259,7 @@ describe('socket.io', function(){
        .query({ transport: 'polling' })
        .set('origin', 'http://herp.derp')
        .end(function (err, res) {
-          expect(res.status).to.be(400);
+          expect(res.status).to.be(403);
           done();
        });
     });
@@ -298,7 +302,7 @@ describe('socket.io', function(){
        .set('origin', 'http://herp.derp')
        .query({ transport: 'polling' })
        .end(function (err, res) {
-          expect(res.status).to.be(400);
+          expect(res.status).to.be(403);
           done();
         });
     });
@@ -328,6 +332,32 @@ describe('socket.io', function(){
           done();
         });
     });
+
+    it('should allow request if custom function in opts.allowRequest returns true', function(done){
+      var sockets = io(http().listen(54022), { allowRequest: function (req, callback) {
+        return callback(null, true);
+      }, origins: 'http://foo.example:*' });
+
+      request.get('http://localhost:54022/socket.io/default/')
+       .query({ transport: 'polling' })
+       .end(function (err, res) {
+          expect(res.status).to.be(200);
+          done();
+        });
+    });
+
+    it('should disallow request if custom function in opts.allowRequest returns false', function(done){
+      var sockets = io(http().listen(54023), { allowRequest: function (req, callback) {
+        return callback(null, false);
+      } });
+      request.get('http://localhost:54023/socket.io/default/')
+       .set('origin', 'http://foo.example')
+       .query({ transport: 'polling' })
+       .end(function (err, res) {
+          expect(res.status).to.be(403);
+          done();
+        });
+    });
   });
 
   describe('close', function(){
@@ -342,12 +372,12 @@ describe('socket.io', function(){
       var clientSocket = client(srv, { reconnection: false });
 
       clientSocket.on('disconnect', function init() {
-        expect(sio.nsps['/'].sockets.length).to.equal(0);
+        expect(Object.keys(sio.nsps['/'].sockets).length).to.equal(0);
         server.listen(PORT);
       });
 
       clientSocket.on('connect', function init() {
-        expect(sio.nsps['/'].sockets.length).to.equal(1);
+        expect(Object.keys(sio.nsps['/'].sockets).length).to.equal(1);
         sio.close();
       });
 
@@ -366,15 +396,15 @@ describe('socket.io', function(){
       var net    = require('net');
       var server = net.createServer();
 
-      var clientSocket = ioc('ws://0.0.0.0:' + PORT);
+      var clientSocket = ioc('ws://0.0.0.0:' + PORT, { reconnection: false });
 
       clientSocket.on('disconnect', function init() {
-        expect(sio.nsps['/'].sockets.length).to.equal(0);
+        expect(Object.keys(sio.nsps['/'].sockets).length).to.equal(0);
         server.listen(PORT);
       });
 
       clientSocket.on('connect', function init() {
-        expect(sio.nsps['/'].sockets.length).to.equal(1);
+        expect(Object.keys(sio.nsps['/'].sockets).length).to.equal(1);
         sio.close();
       });
 
@@ -386,12 +416,31 @@ describe('socket.io', function(){
       });
     });
 
+    describe('graceful close', function(){
+      function fixture(filename) {
+        return '"' + process.execPath + '" "' +
+          join(__dirname, 'fixtures', filename) + '"';
+      }
+
+      it('should stop socket and timers', function(done){
+        exec(fixture('server-close.js'), done);
+      });
+    });
   });
 
   describe('namespaces', function(){
-    var Socket = require('../lib/socket');
-    var Namespace = require('../lib/namespace');
-
+    var Socket;
+    if (testVersion === 'compat') {
+      Socket = require('../dist/socket');
+    } else {
+      Socket = require('../lib/socket');
+    }
+    var Namespace;
+    if (testVersion === 'compat') {
+      Namespace = require('../dist/namespace');
+    } else {
+      Namespace = require('../lib/namespace');
+    }
     it('should be accessible through .sockets', function(){
       var sio = io();
       expect(sio.sockets).to.be.a(Namespace);
@@ -592,6 +641,31 @@ describe('socket.io', function(){
       });
     });
 
+    it('should fire a `disconnecting` event just before leaving all rooms', function(done){
+      var srv = http();
+      var sio = io(srv);
+      srv.listen(function(){
+        var socket = client(srv);
+
+        sio.on('connection', function(s){
+          s.join('a', function(){
+            s.disconnect();
+          });
+
+          var total = 2;
+          s.on('disconnecting', function(reason){
+            expect(Object.keys(s.rooms)).to.eql([s.id, 'a']);
+            total--;
+          });
+
+          s.on('disconnect', function(reason){
+            expect(Object.keys(s.rooms)).to.eql([]);
+            --total || done();
+          });
+        });
+      });
+    });
+
     it('should return error connecting to non-existent namespace', function(done){
       var srv = http();
       var sio = io(srv);
@@ -614,7 +688,7 @@ describe('socket.io', function(){
         var clientSocket2 = client(srv);
         sio.on('connection', function() {
           connections++;
-          if(connections === 2) {
+          if (connections === 2) {
             done();
           }
         });
@@ -642,7 +716,7 @@ describe('socket.io', function(){
       });
       function getClients() {
         sio.of('/chat').clients(function(error, sids) {
-          expect(error).to.be.undefined;
+          expect(error).to.not.be.ok();
           expect(sids).to.contain(chatSids[0]);
           expect(sids).to.contain(chatSids[1]);
           expect(sids).to.not.contain(otherSid);
@@ -685,7 +759,7 @@ describe('socket.io', function(){
       });
       function getClients() {
         sio.of('/chat').in('foo').clients(function(error, sids) {
-          expect(error).to.be.undefined;
+          expect(error).to.not.be.ok();
           expect(sids).to.contain(chatFooSid);
           expect(sids).to.not.contain(chatBarSid);
           expect(sids).to.not.contain(otherSid);
@@ -728,7 +802,7 @@ describe('socket.io', function(){
       });
       function getClients() {
         sio.of('/chat').clients(function(error, sids) {
-          expect(error).to.be.undefined;
+          expect(error).to.not.be.ok();
           expect(sids).to.contain(chatFooSid);
           expect(sids).to.contain(chatBarSid);
           expect(sids).to.not.contain(otherSid);
@@ -748,7 +822,7 @@ describe('socket.io', function(){
           setTimeout(function() {
             sio.of('/chat').emit('ev', 'data');
             sio.of('/chat').volatile.emit('ev', 'data');
-          }, 20);
+          }, 50);
         });
 
         var socket = client(srv, '/chat');
@@ -760,7 +834,7 @@ describe('socket.io', function(){
       setTimeout(function() {
         expect(counter).to.be(1);
         done();
-      }, 200);
+      }, 500);
     });
 
     it('should emit volatile event', function(done) {
@@ -773,7 +847,7 @@ describe('socket.io', function(){
           // Wait to make sure there are no packets being sent for opening the connection
           setTimeout(function() {
             sio.of('/chat').volatile.emit('ev', 'data');
-          }, 20);
+          }, 100);
         });
 
         var socket = client(srv, '/chat');
@@ -785,7 +859,7 @@ describe('socket.io', function(){
       setTimeout(function() {
         expect(counter).to.be(1);
         done();
-      }, 200);
+      }, 500);
     });
 
     it('should enable compression by default', function(done){
@@ -904,12 +978,12 @@ describe('socket.io', function(){
       var srv = http();
       var sio = io(srv);
       srv.listen(function(){
-        var socket = client(srv);
+        var socket = client(srv, { reconnection: false });
         sio.on('connection', function(s){
           s.on('error', function(err){
             expect(err).to.be.an(Error);
             s.on('disconnect', function(reason){
-              expect(reason).to.be('client error');
+              expect(reason).to.be('forced close');
               done();
             });
           });
@@ -1102,7 +1176,7 @@ describe('socket.io', function(){
           // Wait to make sure there are no packets being sent for opening the connection
           setTimeout(function() {
             s.volatile.emit('ev', 'data');
-          }, 20);
+          }, 100);
         });
 
         var socket = client(srv, { transports: ['polling'] });
@@ -1114,7 +1188,7 @@ describe('socket.io', function(){
       setTimeout(function() {
         expect(counter).to.be(1);
         done();
-      }, 200);
+      }, 500);
     });
 
     it('should emit volatile event (ws)', function(done) {
@@ -1153,7 +1227,7 @@ describe('socket.io', function(){
           setTimeout(function() {
             s.volatile.emit('ev', 'data');
             s.volatile.emit('ev', 'data');
-          }, 20);
+          }, 100);
         });
 
         var socket = client(srv, { transports: ['polling'] });
@@ -1165,7 +1239,7 @@ describe('socket.io', function(){
       setTimeout(function() {
         expect(counter).to.be(1);
         done();
-      }, 200);
+      }, 500);
     });
 
     it('should emit only one consecutive volatile event (ws)', function(done) {
@@ -1469,9 +1543,7 @@ describe('socket.io', function(){
       var srv = http();
       var sio = io(srv);
       srv.listen(function() {
-        var addr = srv.listen().address();
-        var url = 'ws://localhost:' + addr.port + '?key1=1&key2=2';
-        var socket = ioc(url);
+        var socket = client(srv, {query: {key1: 1, key2: 2}});
         sio.on('connection', function(s) {
           var parsed = require('url').parse(s.request.url);
           var query = require('querystring').parse(parsed.query);
@@ -1481,11 +1553,27 @@ describe('socket.io', function(){
         });
       });
     });
+    
+    it('should see query parameters sent from secondary namespace connections in handshake object', function(done){
+      var srv = http();
+      var sio = io(srv);
+      var client1 = client(srv);
+      var client2 = client(srv, '/connection2', {query: {key1: 'aa', key2: '&=bb'}});
+      sio.on('connection', function(s){
+      });
+      sio.of('/connection2').on('connection', function(s){
+        expect(s.handshake.query.key1).to.be('aa');
+        expect(s.handshake.query.key2).to.be('&=bb');
+        done();
+      });
+
+
+    });
 
     it('should handle very large json', function(done){
       this.timeout(30000);
       var srv = http();
-      var sio = io(srv);
+      var sio = io(srv, { perMessageDeflate: false });
       var received = 0;
       srv.listen(function(){
         var socket = client(srv);
@@ -1510,10 +1598,9 @@ describe('socket.io', function(){
     });
 
     it('should handle very large binary data', function(done){
-      this.timeout(10000);
-
+      this.timeout(30000);
       var srv = http();
-      var sio = io(srv);
+      var sio = io(srv, { perMessageDeflate: false });
       var received = 0;
       srv.listen(function(){
         var socket = client(srv);
@@ -1553,11 +1640,10 @@ describe('socket.io', function(){
         var clientSocket = client(srv, { reconnectionAttempts: 10, reconnectionDelay: 100 });
         clientSocket.once('connect', function(){
           srv.close(function(){
-            srv.listen(port, function(){
-              clientSocket.on('reconnect', function(){
-                clientSocket.emit('ev', 'payload');
-              });
+            clientSocket.on('reconnect', function(){
+              clientSocket.emit('ev', 'payload');
             });
+            sio.listen(port);
           });
         });
       });
@@ -1597,7 +1683,7 @@ describe('socket.io', function(){
       var srv = http();
       var sio = io(srv);
       srv.listen(function(){
-        var socket = client(srv);
+        var socket = client(srv, { reconnection: false });
         sio.on('connection', function(s){
           s.conn.on('upgrade', function(){
             console.log('\033[96mNote: warning expected and normal in test.\033[39m');
@@ -1614,7 +1700,7 @@ describe('socket.io', function(){
       var srv = http();
       var sio = io(srv);
       srv.listen(function(){
-        var socket = client(srv);
+        var socket = client(srv, { reconnection: false });
         sio.on('connection', function(s){
           s.once('error', function(err){
             expect(err.message).to.match(/Illegal attachments/);
@@ -1631,7 +1717,7 @@ describe('socket.io', function(){
       var srv = http();
       var sio = io(srv);
       srv.listen(function(){
-        var socket = client(srv);
+        var socket = client(srv, { reconnection: false });
         sio.on('connection', function(s){
           s.once('error', function(err){
             expect(err.message).to.match(/Illegal attachments/);
@@ -1643,6 +1729,38 @@ describe('socket.io', function(){
         });
       });
     });
+
+    it('should not crash when messing with Object prototype', function(done){
+      Object.prototype.foo = 'bar';
+      var srv = http();
+      var sio = io(srv);
+      srv.listen(function(){
+        var socket = client(srv);
+
+        sio.on('connection', function(s){
+          s.disconnect(true);
+          sio.close();
+          setTimeout(function(){
+            done();
+          }, 100);
+        });
+      });
+    });
+
+    it('should always trigger the callback (if provided) when joining a room', function(done){
+      var srv = http();
+      var sio = io(srv);
+
+      srv.listen(function(){
+        var socket = client(srv);
+        sio.on('connection', function(s){
+          s.join('a', function(){
+            s.join('a', done);
+          });
+        });
+      });
+    });
+
   });
 
   describe('messaging many', function(){
@@ -1907,15 +2025,15 @@ describe('socket.io', function(){
         var socket = client(srv);
         sio.on('connection', function(s){
           s.join('a', function(){
-            expect(s.rooms).to.eql([s.id, 'a']);
+            expect(Object.keys(s.rooms)).to.eql([s.id, 'a']);
             s.join('b', function(){
-              expect(s.rooms).to.eql([s.id, 'a', 'b']);
+              expect(Object.keys(s.rooms)).to.eql([s.id, 'a', 'b']);
               s.join( 'c', function(){
-                expect(s.rooms).to.eql([s.id, 'a', 'b', 'c']);
+                expect(Object.keys(s.rooms)).to.eql([s.id, 'a', 'b', 'c']);
                 s.leave('b', function(){
-                  expect(s.rooms).to.eql([s.id, 'a', 'c']);
+                  expect(Object.keys(s.rooms)).to.eql([s.id, 'a', 'c']);
                   s.leaveAll();
-                  expect(s.rooms).to.eql([]);
+                  expect(Object.keys(s.rooms)).to.eql([]);
                   done();
                 });
               });
@@ -1951,13 +2069,13 @@ describe('socket.io', function(){
         var socket = client(srv);
         sio.on('connection', function(s){
           s.join('a', function(){
-            expect(s.rooms).to.eql([s.id, 'a']);
+            expect(Object.keys(s.rooms)).to.eql([s.id, 'a']);
             s.join('b', function(){
-              expect(s.rooms).to.eql([s.id, 'a', 'b']);
+              expect(Object.keys(s.rooms)).to.eql([s.id, 'a', 'b']);
               s.leave('unknown', function(){
-                expect(s.rooms).to.eql([s.id, 'a', 'b']);
+                expect(Object.keys(s.rooms)).to.eql([s.id, 'a', 'b']);
                 s.leaveAll();
-                expect(s.rooms).to.eql([]);
+                expect(Object.keys(s.rooms)).to.eql([]);
                 done();
               });
             });
@@ -1965,10 +2083,30 @@ describe('socket.io', function(){
         });
       });
     });
+
+    it('allows to join several rooms at once', function(done) {
+      var srv = http();
+      var sio = io(srv);
+
+      srv.listen(function(){
+        var socket = client(srv);
+        sio.on('connection', function(s){
+          s.join(['a', 'b', 'c'], function(){
+            expect(Object.keys(s.rooms)).to.eql([s.id, 'a', 'b', 'c']);
+            done();
+          });
+        });
+      });
+    });
   });
 
   describe('middleware', function(done){
-    var Socket = require('../lib/socket');
+    var Socket;
+    if (testVersion === 'compat') {
+      Socket = require('../dist/socket');
+    } else {
+      Socket = require('../lib/socket');
+    }
 
     it('should call functions', function(done){
       var srv = http();
@@ -2005,9 +2143,6 @@ describe('socket.io', function(){
       });
       srv.listen(function(){
         var socket = client(srv);
-        socket.on('connect', function(){
-          done(new Error('nope'));
-        });
         socket.on('error', function(err){
           expect(err).to.be('Authentication error');
           done();
@@ -2026,9 +2161,6 @@ describe('socket.io', function(){
       });
       srv.listen(function(){
         var socket = client(srv);
-        socket.on('connect', function(){
-          done(new Error('nope'));
-        });
         socket.on('error', function(err){
           expect(err).to.eql({ a: 'b', c: 3 });
           done();
@@ -2102,6 +2234,99 @@ describe('socket.io', function(){
         chat.on('connect', function() {
           expect(result).to.eql([1, 2, 3, 4]);
           done();
+        });
+      });
+    });
+  });
+
+  describe('socket middleware', function(done){
+    var Socket = require('../lib/socket');
+
+    it('should call functions', function(done){
+      var srv = http();
+      var sio = io(srv);
+      var run = 0;
+
+      srv.listen(function(){
+        var socket = client(srv, { multiplex: false });
+
+        socket.emit('join', 'woot');
+
+        sio.on('connection', function(socket){
+          socket.use(function(event, next){
+            expect(event).to.eql(['join', 'woot']);
+            event.unshift('wrap');
+            run++;
+            next();
+          });
+          socket.use(function(event, next){
+            expect(event).to.eql(['wrap', 'join', 'woot']);
+            run++;
+            next();
+          });
+          socket.on('wrap', function(data1, data2){
+            expect(data1).to.be('join');
+            expect(data2).to.be('woot');
+            expect(run).to.be(2);
+            done();
+          });
+        });
+      });
+    });
+
+    it('should pass errors', function(done){
+      var srv = http();
+      var sio = io(srv);
+
+      srv.listen(function(){
+        var clientSocket = client(srv, { multiplex: false });
+
+        clientSocket.emit('join', 'woot');
+
+        clientSocket.on('error', function(err){
+          expect(err).to.be('Authentication error');
+          done();
+        });
+
+        sio.on('connection', function(socket){
+          socket.use(function(event, next){
+            next(new Error('Authentication error'));
+          });
+          socket.use(function(event, next){
+            done(new Error('nope'));
+          });
+
+          socket.on('join', function(){
+            done(new Error('nope'));
+          });
+        });
+      });
+    });
+
+    it('should pass `data` of error object', function(done){
+      var srv = http();
+      var sio = io(srv);
+
+      srv.listen(function(){
+        var clientSocket = client(srv, { multiplex: false });
+
+        clientSocket.emit('join', 'woot');
+
+        clientSocket.on('error', function(err){
+          expect(err).to.eql({ a: 'b', c: 3 });
+          done();
+        });
+
+        sio.on('connection', function(socket){
+          socket.use(function(event, next){
+            var err = new Error('Authentication error');
+            err.data = { a: 'b', c: 3 };
+            next(err);
+          });
+
+          socket.on('join', function(){
+            done(new Error('nope'));
+          });
         });
       });
     });
